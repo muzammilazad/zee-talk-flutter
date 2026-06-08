@@ -41,6 +41,7 @@ dependencies:
   provider: ^6.1.5+1
   flutter_webrtc: ^0.9.48+hotfix.1
   permission_handler: ^11.0.1
+  flutter_local_notifications: ^18.0.1
 
 dev_dependencies:
   flutter_test:

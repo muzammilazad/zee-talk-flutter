@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'core/config/app_config.dart';
+import 'core/navigation/app_navigator.dart';
 import 'core/theme/app_colors.dart';
 import 'features/auth/screens/login_screen.dart';
 
@@ -10,6 +11,7 @@ class ZeeTalkApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: appNavigatorKey,
       title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(

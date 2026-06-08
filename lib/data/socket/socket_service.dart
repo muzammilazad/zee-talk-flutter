@@ -11,7 +11,7 @@ class SocketService {
   static final SocketService instance = SocketService._();
 
   io.Socket? _socket;
-  void Function(ChatMessage message)? _messageCallback;
+  final Set<void Function(ChatMessage message)> _messageCallbacks = {};
   void Function(dynamic data)? _messageHandler;
   final Set<void Function(Set<String> onlineUserIds)> _presenceCallbacks = {};
   void Function(dynamic data)? _presenceHandler;
@@ -20,6 +20,20 @@ class SocketService {
   final Set<void Function(String userId, String lastSeenAt)>
       _lastSeenCallbacks = {};
   void Function(dynamic data)? _lastSeenHandler;
+  final Set<void Function(String from, List<String> messageIds)>
+      _readReceiptCallbacks = {};
+  final Map<String, void Function(dynamic data)> _readReceiptHandlers = {};
+  final Set<void Function(ChatMessage message)> _messageStatusCallbacks = {};
+  void Function(dynamic data)? _messageStatusHandler;
+  final Set<void Function(Map<String, dynamic> data)>
+      _incomingCallCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _callRejectCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _callEndCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _callTimeoutCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)>
+      _callUnavailableCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _missedCallCallbacks = {};
+  final Map<String, void Function(dynamic data)> _callHandlers = {};
   Set<String> _onlineUserIds = {};
 
   Future<void> connect() async {
@@ -123,8 +137,68 @@ class SocketService {
     }
   }
 
-  void onMessage(void Function(ChatMessage message) callback) {
-    _messageCallback = callback;
+  void markMessagesRead({
+    required String peerId,
+    List<String> messageIds = const [],
+  }) {
+    _socket?.emit('message-read', {
+      'peerId': peerId,
+      'messageIds': messageIds,
+    });
+  }
+
+  Future<Map<String, dynamic>?> startCall({
+    required String to,
+    required String callId,
+    required String callType,
+  }) async {
+    final socket = _socket;
+    if (socket == null || !socket.connected) {
+      throw const SocketServiceException('Call service is not connected');
+    }
+
+    final response = await socket.emitWithAckAsync(
+      'call-start',
+      {
+        'to': to,
+        'callId': callId,
+        'callType': callType,
+      },
+    );
+    if (response is! Map) {
+      return null;
+    }
+    return Map<String, dynamic>.from(response);
+  }
+
+  void rejectCall({
+    required String to,
+    required String callId,
+    required String callType,
+  }) {
+    _socket?.emit('call-reject', {
+      'to': to,
+      'callId': callId,
+      'callType': callType,
+    });
+  }
+
+  void endCall({
+    required String to,
+    required String callId,
+    required String callType,
+  }) {
+    _socket?.emit('call-end', {
+      'to': to,
+      'callId': callId,
+      'callType': callType,
+    });
+  }
+
+  void addMessageListener(
+    void Function(ChatMessage message) callback,
+  ) {
+    _messageCallbacks.add(callback);
     _bindMessageListeners();
   }
 
@@ -133,12 +207,14 @@ class SocketService {
     _bindPresenceListeners();
     _bindTypingListener();
     _bindLastSeenListener();
+    _bindReadReceiptListeners();
+    _bindMessageStatusListener();
+    _bindCallListeners();
   }
 
   void _bindMessageListeners() {
     final socket = _socket;
-    final callback = _messageCallback;
-    if (socket == null || callback == null) {
+    if (socket == null || _messageCallbacks.isEmpty) {
       return;
     }
 
@@ -149,9 +225,14 @@ class SocketService {
     }
 
     void handleMessage(dynamic data) {
+      debugPrint('[Socket] incoming message raw: $data');
       final messageData = _extractMessageData(data);
       if (messageData != null) {
-        callback(ChatMessage.fromJson(messageData));
+        final message = ChatMessage.fromJson(messageData);
+        debugPrint('[Socket] incoming message id: ${message.id}');
+        for (final callback in List.of(_messageCallbacks)) {
+          callback(message);
+        }
       }
     }
 
@@ -175,14 +256,20 @@ class SocketService {
     return payload;
   }
 
-  void offMessage() {
+  void removeMessageListener(
+    void Function(ChatMessage message) callback,
+  ) {
+    _messageCallbacks.remove(callback);
+    if (_messageCallbacks.isNotEmpty) {
+      return;
+    }
+
     final handler = _messageHandler;
     if (handler != null) {
       _socket?.off('private-message', handler);
       _socket?.off('receive-message', handler);
     }
     _messageHandler = null;
-    _messageCallback = null;
   }
 
   void onPresence(
@@ -371,6 +458,255 @@ class SocketService {
       _socket?.off('last-seen-updated', handler);
     }
     _lastSeenHandler = null;
+  }
+
+  void addReadReceiptListener(
+    void Function(String from, List<String> messageIds) callback,
+  ) {
+    _readReceiptCallbacks.add(callback);
+    _bindReadReceiptListeners();
+  }
+
+  void _bindReadReceiptListeners() {
+    final socket = _socket;
+    if (socket == null || _readReceiptCallbacks.isEmpty) {
+      return;
+    }
+
+    for (final event in ['message-read', 'messages-read']) {
+      final previousHandler = _readReceiptHandlers[event];
+      if (previousHandler != null) {
+        socket.off(event, previousHandler);
+      }
+
+      void handleReceipt(dynamic data) {
+        debugPrint('[Socket] $event raw: $data');
+        if (data is! Map) {
+          return;
+        }
+
+        final payload = Map<String, dynamic>.from(data);
+        final from = payload['from']?.toString();
+        if (from == null || from.isEmpty) {
+          return;
+        }
+
+        final rawIds = payload['messageIds'];
+        final messageIds = rawIds is List
+            ? rawIds
+                .where((id) => id != null)
+                .map((id) => id.toString())
+                .toList()
+            : <String>[];
+        for (final callback in List.of(_readReceiptCallbacks)) {
+          callback(from, messageIds);
+        }
+      }
+
+      _readReceiptHandlers[event] = handleReceipt;
+      socket.on(event, handleReceipt);
+    }
+  }
+
+  void removeReadReceiptListener(
+    void Function(String from, List<String> messageIds) callback,
+  ) {
+    _readReceiptCallbacks.remove(callback);
+    if (_readReceiptCallbacks.isNotEmpty) {
+      return;
+    }
+
+    for (final entry in _readReceiptHandlers.entries) {
+      _socket?.off(entry.key, entry.value);
+    }
+    _readReceiptHandlers.clear();
+  }
+
+  void addMessageStatusListener(
+    void Function(ChatMessage message) callback,
+  ) {
+    _messageStatusCallbacks.add(callback);
+    _bindMessageStatusListener();
+  }
+
+  void _bindMessageStatusListener() {
+    final socket = _socket;
+    if (socket == null || _messageStatusCallbacks.isEmpty) {
+      return;
+    }
+
+    final previousHandler = _messageStatusHandler;
+    if (previousHandler != null) {
+      socket.off('message-status-updated', previousHandler);
+    }
+
+    void handleStatus(dynamic data) {
+      debugPrint('[Socket] message-status-updated raw: $data');
+      final messageData = _extractMessageData(data);
+      if (messageData == null) {
+        return;
+      }
+
+      final message = ChatMessage.fromJson(messageData);
+      for (final callback in List.of(_messageStatusCallbacks)) {
+        callback(message);
+      }
+    }
+
+    _messageStatusHandler = handleStatus;
+    socket.on('message-status-updated', handleStatus);
+  }
+
+  void removeMessageStatusListener(
+    void Function(ChatMessage message) callback,
+  ) {
+    _messageStatusCallbacks.remove(callback);
+    if (_messageStatusCallbacks.isNotEmpty) {
+      return;
+    }
+
+    final handler = _messageStatusHandler;
+    if (handler != null) {
+      _socket?.off('message-status-updated', handler);
+    }
+    _messageStatusHandler = null;
+  }
+
+  void addIncomingCallListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _incomingCallCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeIncomingCallListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _incomingCallCallbacks.remove(callback);
+    _unbindCallEventIfUnused('incoming-call', _incomingCallCallbacks);
+  }
+
+  void addCallRejectListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callRejectCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeCallRejectListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callRejectCallbacks.remove(callback);
+    _unbindCallEventIfUnused('call-reject', _callRejectCallbacks);
+  }
+
+  void addCallEndListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callEndCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeCallEndListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callEndCallbacks.remove(callback);
+    _unbindCallEventIfUnused('call-end', _callEndCallbacks);
+  }
+
+  void addCallTimeoutListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callTimeoutCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeCallTimeoutListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callTimeoutCallbacks.remove(callback);
+    _unbindCallEventIfUnused('call-timeout', _callTimeoutCallbacks);
+  }
+
+  void addCallUnavailableListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callUnavailableCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeCallUnavailableListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callUnavailableCallbacks.remove(callback);
+    _unbindCallEventIfUnused('call-unavailable', _callUnavailableCallbacks);
+  }
+
+  void addMissedCallListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _missedCallCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeMissedCallListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _missedCallCallbacks.remove(callback);
+    _unbindCallEventIfUnused('missed-call', _missedCallCallbacks);
+  }
+
+  void _bindCallListeners() {
+    _bindCallEvent('incoming-call', _incomingCallCallbacks);
+    _bindCallEvent('call-reject', _callRejectCallbacks);
+    _bindCallEvent('call-end', _callEndCallbacks);
+    _bindCallEvent('call-timeout', _callTimeoutCallbacks);
+    _bindCallEvent('call-unavailable', _callUnavailableCallbacks);
+    _bindCallEvent('missed-call', _missedCallCallbacks);
+  }
+
+  void _bindCallEvent(
+    String event,
+    Set<void Function(Map<String, dynamic> data)> callbacks,
+  ) {
+    final socket = _socket;
+    if (socket == null || callbacks.isEmpty) {
+      return;
+    }
+
+    final previousHandler = _callHandlers[event];
+    if (previousHandler != null) {
+      socket.off(event, previousHandler);
+    }
+
+    void handleCallEvent(dynamic data) {
+      debugPrint('[Socket Call] $event: $data');
+      if (data is! Map) {
+        return;
+      }
+
+      final payload = Map<String, dynamic>.from(data);
+      for (final callback in List.of(callbacks)) {
+        callback(payload);
+      }
+    }
+
+    _callHandlers[event] = handleCallEvent;
+    socket.on(event, handleCallEvent);
+  }
+
+  void _unbindCallEventIfUnused(
+    String event,
+    Set<void Function(Map<String, dynamic> data)> callbacks,
+  ) {
+    if (callbacks.isNotEmpty) {
+      return;
+    }
+
+    final handler = _callHandlers.remove(event);
+    if (handler != null) {
+      _socket?.off(event, handler);
+    }
   }
 }
 

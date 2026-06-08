@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/state/current_chat_tracker.dart';
 import '../../../core/storage/token_storage.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/last_seen_formatter.dart';
 import '../../../data/api/messages_api.dart';
 import '../../../data/socket/socket_service.dart';
+import '../../calls/services/call_manager.dart';
 import '../../users/models/contact_user.dart';
 import '../models/chat_message.dart';
 
@@ -44,6 +46,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    CurrentChatTracker().openChat(widget.contact.id);
     _lastSeenAt = widget.contact.lastSeenAt;
     _initializeChat();
   }
@@ -61,14 +64,18 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       _currentUserId = currentUserId;
-      _socketService.offMessage();
-      _socketService.onMessage(_handleSocketMessage);
+      _socketService.removeMessageListener(_handleSocketMessage);
+      _socketService.addMessageListener(_handleSocketMessage);
       _socketService.removePresenceListener(_handlePresence);
       _socketService.onPresence(_handlePresence);
       _socketService.offTyping(_handleTyping);
       _socketService.onTyping(_handleTyping);
       _socketService.removeLastSeenListener(_handleLastSeenUpdated);
       _socketService.onLastSeenUpdated(_handleLastSeenUpdated);
+      _socketService.removeReadReceiptListener(_handleReadReceipt);
+      _socketService.addReadReceiptListener(_handleReadReceipt);
+      _socketService.removeMessageStatusListener(_handleMessageStatus);
+      _socketService.addMessageStatusListener(_handleMessageStatus);
       await _socketService.connect();
 
       final timeline = await _messagesApi.getTimeline(widget.contact.id);
@@ -82,6 +89,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         _sortMessages();
       });
+      _markIncomingMessagesRead(timeline);
       _scrollToBottom();
     } catch (error) {
       if (!mounted) {
@@ -100,11 +108,81 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    final isIncoming = message.senderId == widget.contact.id &&
+        message.receiverId == _currentUserId;
+    final displayedMessage = isIncoming ? message.withStatus('read') : message;
+    setState(() {
+      _upsertMessage(displayedMessage);
+      _sortMessages();
+    });
+    if (isIncoming) {
+      final id = message.id;
+      _socketService.markMessagesRead(
+        peerId: widget.contact.id,
+        messageIds: id == null || id.isEmpty ? const [] : [id],
+      );
+    }
+    _scrollToBottom();
+  }
+
+  void _markIncomingMessagesRead(Iterable<ChatMessage> messages) {
+    final unreadIds = messages
+        .where(
+          (message) =>
+              message.senderId == widget.contact.id &&
+              message.receiverId == _currentUserId &&
+              message.status?.toLowerCase() != 'read',
+        )
+        .map((message) => message.id)
+        .whereType<String>()
+        .where((id) => id.isNotEmpty)
+        .toList();
+
+    setState(() {
+      for (var index = 0; index < _messages.length; index++) {
+        final message = _messages[index];
+        if (message.senderId == widget.contact.id &&
+            message.receiverId == _currentUserId &&
+            message.status?.toLowerCase() != 'read') {
+          _messages[index] = message.withStatus('read');
+        }
+      }
+    });
+    _socketService.markMessagesRead(
+      peerId: widget.contact.id,
+      messageIds: unreadIds,
+    );
+  }
+
+  void _handleReadReceipt(String from, List<String> messageIds) {
+    if (!mounted) {
+      return;
+    }
+
+    final ids = messageIds.toSet();
+    setState(() {
+      for (var index = 0; index < _messages.length; index++) {
+        final message = _messages[index];
+        final isOutgoing = message.senderId == _currentUserId &&
+            message.receiverId == widget.contact.id;
+        final matchesIds = message.id != null && ids.contains(message.id);
+        final marksConversation = ids.isEmpty && from == widget.contact.id;
+        if (isOutgoing && (matchesIds || marksConversation)) {
+          _messages[index] = message.withStatus('read');
+        }
+      }
+    });
+  }
+
+  void _handleMessageStatus(ChatMessage message) {
+    if (!mounted || !_belongsToConversation(message)) {
+      return;
+    }
+
     setState(() {
       _upsertMessage(message);
       _sortMessages();
     });
-    _scrollToBottom();
   }
 
   void _handlePresence(Set<String> onlineUserIds) {
@@ -344,9 +422,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showCallPlaceholder() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Calls will be added next')),
+  void _startCall(String callType) {
+    CallManager().startOutgoingCall(
+      contact: widget.contact,
+      callType: callType,
     );
   }
 
@@ -441,12 +520,12 @@ class _ChatScreenState extends State<ChatScreen> {
           _buildHeaderIcon(
             icon: Icons.call_outlined,
             tooltip: 'Audio call',
-            onPressed: _showCallPlaceholder,
+            onPressed: () => _startCall('voice'),
           ),
           _buildHeaderIcon(
             icon: Icons.videocam_outlined,
             tooltip: 'Video call',
-            onPressed: _showCallPlaceholder,
+            onPressed: () => _startCall('video'),
           ),
         ],
       ),
@@ -582,12 +661,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    CurrentChatTracker().closeChat(widget.contact.id);
     _stopTyping();
     _remoteTypingTimer?.cancel();
-    _socketService.offMessage();
+    _socketService.removeMessageListener(_handleSocketMessage);
     _socketService.removePresenceListener(_handlePresence);
     _socketService.offTyping(_handleTyping);
     _socketService.removeLastSeenListener(_handleLastSeenUpdated);
+    _socketService.removeReadReceiptListener(_handleReadReceipt);
+    _socketService.removeMessageStatusListener(_handleMessageStatus);
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();

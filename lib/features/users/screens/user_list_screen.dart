@@ -1,12 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/notifications/local_notification_service.dart';
+import '../../../core/state/current_chat_tracker.dart';
 import '../../../core/storage/token_storage.dart';
 import '../../../core/theme/app_colors.dart';
-import '../../../core/utils/last_seen_formatter.dart';
+import '../../../data/api/conversations_api.dart';
 import '../../../data/api/users_api.dart';
 import '../../../data/socket/socket_service.dart';
 import '../../auth/screens/login_screen.dart';
+import '../../calls/services/call_manager.dart';
+import '../../chat/models/chat_message.dart';
 import '../../chat/screens/chat_screen.dart';
 import '../../contacts/screens/add_contact_screen.dart';
 import '../../contacts/screens/requests_screen.dart';
@@ -21,29 +27,100 @@ class UserListScreen extends StatefulWidget {
 
 class _UserListScreenState extends State<UserListScreen> {
   final UsersApi _usersApi = UsersApi();
+  final ConversationsApi _conversationsApi = ConversationsApi();
   final SocketService _socketService = SocketService.instance;
   List<ContactUser> _contacts = [];
+  Map<String, int> _unreadCounts = {};
+  Map<String, String> _latestPreviews = {};
+  final Set<String> _processedMessageIds = {};
   Set<String> _onlineUserIds = {};
+  String? _currentUserId;
+  String? _openChatPeerId;
   String _currentUserName = '';
   String? _errorMessage;
   bool _isLoading = true;
+  int _realtimeRevision = 0;
 
   @override
   void initState() {
     super.initState();
     _loadCurrentUserName();
     _loadContacts();
-    _initializePresence();
+    _loadSummaries();
+    _initializeRealtime();
     _socketService.onLastSeenUpdated(_handleLastSeenUpdated);
   }
 
-  Future<void> _initializePresence() async {
+  Future<void> _initializeRealtime() async {
+    _currentUserId = await TokenStorage().getUserId();
+    _socketService.addMessageListener(_handleRealtimeMessage);
     _socketService.onPresence(_handlePresence);
     try {
       await _socketService.connect();
+      await CallManager().initialize();
     } catch (error) {
       debugPrint('Presence connection failed: $error');
     }
+  }
+
+  void _handleRealtimeMessage(ChatMessage message) {
+    final currentUserId = _currentUserId;
+    if (!mounted || currentUserId == null || currentUserId.isEmpty) {
+      return;
+    }
+
+    final messageId = message.id;
+    if (messageId != null && messageId.isNotEmpty) {
+      if (_processedMessageIds.contains(messageId)) {
+        return;
+      }
+      _processedMessageIds.add(messageId);
+    }
+
+    final isOutgoing = message.senderId == currentUserId;
+    final peerId = isOutgoing ? message.receiverId : message.senderId;
+    if (peerId == null || peerId.isEmpty) {
+      return;
+    }
+
+    final preview = _messagePreview(message);
+    setState(() {
+      _realtimeRevision++;
+      if (preview.isNotEmpty) {
+        _latestPreviews[peerId] = preview;
+      }
+      if (!isOutgoing && _openChatPeerId != peerId) {
+        _unreadCounts[peerId] = (_unreadCounts[peerId] ?? 0) + 1;
+      }
+    });
+
+    if (!isOutgoing && !CurrentChatTracker().isChatOpen(peerId)) {
+      unawaited(
+        LocalNotificationService().showMessageNotification(
+          title: _contactName(peerId),
+          body: preview.isEmpty ? 'New message' : preview,
+          payload: peerId,
+        ),
+      );
+    }
+  }
+
+  String _contactName(String userId) {
+    for (final contact in _contacts) {
+      if (contact.id == userId) {
+        final name = contact.name.trim();
+        return name.isEmpty ? 'Zee Talk' : name;
+      }
+    }
+    return 'Zee Talk';
+  }
+
+  String _messagePreview(ChatMessage message) {
+    final text = message.displayText.trim();
+    if (text.isNotEmpty) {
+      return text;
+    }
+    return message.type?.toLowerCase().contains('call') == true ? 'Call' : '';
   }
 
   void _handlePresence(Set<String> onlineUserIds) {
@@ -99,7 +176,53 @@ class _UserListScreenState extends State<UserListScreen> {
     }
   }
 
+  Future<void> _loadSummaries() async {
+    final revisionAtStart = _realtimeRevision;
+    try {
+      final summaries = await _conversationsApi.getSummary();
+      if (!mounted) {
+        return;
+      }
+
+      final unreadCounts = <String, int>{};
+      final latestPreviews = <String, String>{};
+      final summaryMessageIds = <String>{};
+      for (final summary in summaries) {
+        unreadCounts[summary.peerId] = summary.unreadCount;
+        final preview = summary.latestText?.trim();
+        if (preview != null && preview.isNotEmpty) {
+          latestPreviews[summary.peerId] = preview;
+        }
+        final latestId = summary.latestId;
+        if (latestId != null && latestId.isNotEmpty) {
+          summaryMessageIds.add(latestId);
+        }
+      }
+
+      setState(() {
+        if (_realtimeRevision != revisionAtStart) {
+          unreadCounts.addAll(_unreadCounts);
+          latestPreviews.addAll(_latestPreviews);
+        }
+        _unreadCounts = unreadCounts;
+        _latestPreviews = latestPreviews;
+        _processedMessageIds.addAll(summaryMessageIds);
+      });
+    } catch (error) {
+      debugPrint('Conversation summary load failed: $error');
+    }
+  }
+
+  Future<void> _refreshHomeData() async {
+    await Future.wait([
+      _loadContacts(),
+      _loadSummaries(),
+    ]);
+  }
+
   Future<void> _logout(BuildContext context) async {
+    CallManager().dispose();
+    _socketService.removeMessageListener(_handleRealtimeMessage);
     _socketService.removePresenceListener(_handlePresence);
     _socketService.removeLastSeenListener(_handleLastSeenUpdated);
     _socketService.disconnect();
@@ -123,7 +246,7 @@ class _UserListScreenState extends State<UserListScreen> {
     );
   }
 
-  void _openAddContact() async {
+  Future<void> _openAddContact() async {
     await Navigator.push(
       context,
       MaterialPageRoute<void>(
@@ -131,11 +254,11 @@ class _UserListScreenState extends State<UserListScreen> {
       ),
     );
     if (mounted) {
-      await _loadContacts();
+      await _refreshHomeData();
     }
   }
 
-  void _openRequests() async {
+  Future<void> _openRequests() async {
     await Navigator.push(
       context,
       MaterialPageRoute<void>(
@@ -143,7 +266,24 @@ class _UserListScreenState extends State<UserListScreen> {
       ),
     );
     if (mounted) {
-      await _loadContacts();
+      await _refreshHomeData();
+    }
+  }
+
+  Future<void> _openChat(ContactUser contact) async {
+    setState(() {
+      _openChatPeerId = contact.id;
+      _unreadCounts[contact.id] = 0;
+    });
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => ChatScreen(contact: contact),
+      ),
+    );
+    if (mounted) {
+      setState(() => _openChatPeerId = null);
+      await _refreshHomeData();
     }
   }
 
@@ -401,18 +541,14 @@ class _UserListScreenState extends State<UserListScreen> {
   Widget _buildContactItem(ContactUser contact) {
     final isOnline = _onlineUserIds.contains(contact.id) ||
         _onlineUserIds.contains(contact.id.toString());
+    final latestPreview = _latestPreviews[contact.id]?.trim();
+    final hasPreview = latestPreview != null && latestPreview.isNotEmpty;
+    final unreadCount = _unreadCounts[contact.id] ?? 0;
 
     return Material(
       color: Colors.white,
       child: InkWell(
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute<void>(
-              builder: (_) => ChatScreen(contact: contact),
-            ),
-          );
-        },
+        onTap: () => _openChat(contact),
         splashColor: AppColors.mintAvatar.withOpacity(0.45),
         highlightColor: const Color(0xFFF2FFFB),
         child: Container(
@@ -451,11 +587,15 @@ class _UserListScreenState extends State<UserListScreen> {
                     ),
                     const SizedBox(height: 5),
                     Text(
-                      isOnline ? 'Online' : formatLastSeen(contact.lastSeenAt),
+                      hasPreview
+                          ? latestPreview
+                          : isOnline
+                              ? 'Online'
+                              : 'Offline',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: isOnline
+                        color: !hasPreview && isOnline
                             ? AppColors.onlineGreen
                             : AppColors.mutedText,
                         fontSize: 13,
@@ -465,12 +605,41 @@ class _UserListScreenState extends State<UserListScreen> {
                 ),
               ),
               const SizedBox(width: 12),
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: isOnline ? AppColors.onlineGreen : AppColors.offline,
-                  shape: BoxShape.circle,
-                ),
-                child: const SizedBox(width: 9, height: 9),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (unreadCount > 0) ...[
+                    Container(
+                      constraints: const BoxConstraints(
+                        minWidth: 22,
+                        minHeight: 22,
+                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: AppColors.onlineGreen,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        unreadCount > 99 ? '99+' : unreadCount.toString(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                  ],
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color:
+                          isOnline ? AppColors.onlineGreen : AppColors.offline,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const SizedBox(width: 9, height: 9),
+                  ),
+                ],
               ),
             ],
           ),
@@ -558,6 +727,7 @@ class _UserListScreenState extends State<UserListScreen> {
 
   @override
   void dispose() {
+    _socketService.removeMessageListener(_handleRealtimeMessage);
     _socketService.removePresenceListener(_handlePresence);
     _socketService.removeLastSeenListener(_handleLastSeenUpdated);
     super.dispose();

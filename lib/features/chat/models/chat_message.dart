@@ -25,6 +25,21 @@ class ChatMessage {
 
   String get displayText => text ?? message ?? '';
 
+  ChatMessage withStatus(String? value) {
+    return ChatMessage(
+      id: id,
+      senderId: senderId,
+      receiverId: receiverId,
+      type: type,
+      text: text,
+      message: message,
+      status: value,
+      createdAt: createdAt,
+      timestamp: timestamp,
+      replyToMessageId: replyToMessageId,
+    );
+  }
+
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
     return ChatMessage(
       id: json['id']?.toString(),
