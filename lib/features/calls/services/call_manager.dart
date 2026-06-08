@@ -57,7 +57,7 @@ class CallManager {
 
     await initialize();
     final callId =
-        '${DateTime.now().millisecondsSinceEpoch}-${contact.id}';
+        'call_${DateTime.now().millisecondsSinceEpoch}_${contact.id}';
 
     try {
       final acknowledgement = await _socketService.startCall(
@@ -150,10 +150,7 @@ class CallManager {
   void _handleIncomingCall(Map<String, dynamic> data) {
     final callId = data['callId']?.toString();
     final peerId = data['from']?.toString();
-    if (callId == null ||
-        callId.isEmpty ||
-        peerId == null ||
-        peerId.isEmpty) {
+    if (callId == null || callId.isEmpty || peerId == null || peerId.isEmpty) {
       return;
     }
 
@@ -163,13 +160,15 @@ class CallManager {
         return;
       }
       // TODO: emit an explicit busy response when the backend supports it.
+      debugPrint(
+        '[CallManager] incoming call ignored while another call is active',
+      );
       return;
     }
 
     final fromUser = data['fromUser'];
-    final peerName = fromUser is Map
-        ? fromUser['name']?.toString() ?? 'Unknown'
-        : 'Unknown';
+    final peerName =
+        fromUser is Map ? fromUser['name']?.toString() ?? 'Unknown' : 'Unknown';
     final session = CallSession(
       callId: callId,
       peerId: peerId,
@@ -201,7 +200,7 @@ class CallManager {
   }
 
   void _handleMissedCall(Map<String, dynamic> data) {
-    _finishMatchingCall(data, 'missed');
+    debugPrint('[CallManager] missed call: $data');
   }
 
   void _finishMatchingCall(Map<String, dynamic> data, String status) {

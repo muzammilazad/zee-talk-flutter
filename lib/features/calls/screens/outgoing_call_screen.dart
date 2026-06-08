@@ -47,7 +47,7 @@ class _OutgoingCallScreenState extends State<OutgoingCallScreen> {
     setState(() => _isClosing = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        Navigator.maybePop(context);
+        Navigator.of(context).pop();
       }
     });
   }
@@ -87,8 +87,10 @@ class _OutgoingCallScreenState extends State<OutgoingCallScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: _isClosing,
+    return WillPopScope(
+      onWillPop: () async {
+        return false;
+      },
       child: Scaffold(
         backgroundColor: AppColors.darkGreen,
         body: SafeArea(

@@ -25,14 +25,19 @@ class SocketService {
   final Map<String, void Function(dynamic data)> _readReceiptHandlers = {};
   final Set<void Function(ChatMessage message)> _messageStatusCallbacks = {};
   void Function(dynamic data)? _messageStatusHandler;
-  final Set<void Function(Map<String, dynamic> data)>
-      _incomingCallCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _incomingCallCallbacks =
+      {};
   final Set<void Function(Map<String, dynamic> data)> _callRejectCallbacks = {};
   final Set<void Function(Map<String, dynamic> data)> _callEndCallbacks = {};
-  final Set<void Function(Map<String, dynamic> data)> _callTimeoutCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _callTimeoutCallbacks =
+      {};
   final Set<void Function(Map<String, dynamic> data)>
       _callUnavailableCallbacks = {};
   final Set<void Function(Map<String, dynamic> data)> _missedCallCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _callOfferCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _callAnswerCallbacks = {};
+  final Set<void Function(Map<String, dynamic> data)> _iceCandidateCallbacks =
+      {};
   final Map<String, void Function(dynamic data)> _callHandlers = {};
   Set<String> _onlineUserIds = {};
 
@@ -192,6 +197,48 @@ class SocketService {
       'to': to,
       'callId': callId,
       'callType': callType,
+    });
+  }
+
+  void sendCallOffer({
+    required String to,
+    required String callId,
+    required String callType,
+    required Map<String, dynamic> offer,
+  }) {
+    _socket?.emit('call-offer', {
+      'to': to,
+      'callId': callId,
+      'callType': callType,
+      'offer': offer,
+    });
+  }
+
+  void sendCallAnswer({
+    required String to,
+    required String callId,
+    required String callType,
+    required Map<String, dynamic> answer,
+  }) {
+    _socket?.emit('call-answer', {
+      'to': to,
+      'callId': callId,
+      'callType': callType,
+      'answer': answer,
+    });
+  }
+
+  void sendIceCandidate({
+    required String to,
+    required String callId,
+    required String callType,
+    required Map<String, dynamic> candidate,
+  }) {
+    _socket?.emit('ice-candidate', {
+      'to': to,
+      'callId': callId,
+      'callType': callType,
+      'candidate': candidate,
     });
   }
 
@@ -656,6 +703,48 @@ class SocketService {
     _unbindCallEventIfUnused('missed-call', _missedCallCallbacks);
   }
 
+  void addCallOfferListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callOfferCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeCallOfferListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callOfferCallbacks.remove(callback);
+    _unbindCallEventIfUnused('call-offer', _callOfferCallbacks);
+  }
+
+  void addCallAnswerListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callAnswerCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeCallAnswerListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _callAnswerCallbacks.remove(callback);
+    _unbindCallEventIfUnused('call-answer', _callAnswerCallbacks);
+  }
+
+  void addIceCandidateListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _iceCandidateCallbacks.add(callback);
+    _bindCallListeners();
+  }
+
+  void removeIceCandidateListener(
+    void Function(Map<String, dynamic> data) callback,
+  ) {
+    _iceCandidateCallbacks.remove(callback);
+    _unbindCallEventIfUnused('ice-candidate', _iceCandidateCallbacks);
+  }
+
   void _bindCallListeners() {
     _bindCallEvent('incoming-call', _incomingCallCallbacks);
     _bindCallEvent('call-reject', _callRejectCallbacks);
@@ -663,6 +752,9 @@ class SocketService {
     _bindCallEvent('call-timeout', _callTimeoutCallbacks);
     _bindCallEvent('call-unavailable', _callUnavailableCallbacks);
     _bindCallEvent('missed-call', _missedCallCallbacks);
+    _bindCallEvent('call-offer', _callOfferCallbacks);
+    _bindCallEvent('call-answer', _callAnswerCallbacks);
+    _bindCallEvent('ice-candidate', _iceCandidateCallbacks);
   }
 
   void _bindCallEvent(

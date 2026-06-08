@@ -42,7 +42,7 @@ class _IncomingCallScreenState extends State<IncomingCallScreen> {
     setState(() => _isClosing = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        Navigator.maybePop(context);
+        Navigator.of(context).pop();
       }
     });
   }
@@ -82,8 +82,10 @@ class _IncomingCallScreenState extends State<IncomingCallScreen> {
   Widget build(BuildContext context) {
     final typeLabel = widget.session.isVideo ? 'video' : 'voice';
 
-    return PopScope(
-      canPop: _isClosing,
+    return WillPopScope(
+      onWillPop: () async {
+        return false;
+      },
       child: Scaffold(
         backgroundColor: AppColors.darkGreen,
         body: SafeArea(
